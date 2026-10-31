@@ -32,4 +32,4 @@ Issues and pull requests are welcome.
 
 ## License
 
-TODO
+MIT License – see [LICENSE](LICENSE) for details.
