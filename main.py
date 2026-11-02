@@ -1,12 +1,14 @@
 import os
+import sys
 import re
 import socket
 import struct
 import subprocess
 import time
 
-HOST = "127.0.0.1"
-PORT = 9999
+HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9999
+MSG = sys.argv[3].encode() if len(sys.argv) > 3 else b"hello"
 LOG = "/tmp/t.log"
 
 SRV_CODE = (
@@ -25,9 +27,9 @@ CLI_CODE = (
     "s=socket.create_connection((\"%s\", %d)); "
     "s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)); "
     "time.sleep(1); "
-    "s.send(b\"hello\"); "
+    "s.send(b\"%s\"); "
     "s.close()"
-) % (HOST, PORT)
+) % (HOST, PORT, MSG.decode())
 
 print("start")
 
