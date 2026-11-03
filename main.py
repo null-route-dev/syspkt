@@ -102,7 +102,7 @@ try:
                 continue
             seen.add(k)
             if PORT in (sp, dp):
-                parsed.append((sp, dp, sq, pl))
+                parsed.append((sp, dp, sq, pl, p))
 
     sends = []
     with open(LOG) as f:
@@ -128,9 +128,10 @@ try:
                 int(rp, 16),
             )
             print("  conn", ls, "->", rs)
-        for sp, dp, sq, pl in parsed:
+        for sp, dp, sq, pl, p in parsed:
             if pl == nb:
-                print("  pkt", sq, "payload", pl)
+                d = "->" if dp == PORT else "<-"
+                print("  pkt", d, sq, "payload", pl, repr(p[42:42 + pl]))
 finally:
     if st is not None:
         st.kill()
