@@ -131,7 +131,10 @@ try:
         for sp, dp, sq, pl, p in parsed:
             if pl == nb:
                 d = "->" if dp == PORT else "<-"
-                print("  pkt", d, sq, "payload", pl, repr(p[42:42 + pl]))
+                print(
+                    "  pkt", d, sp, "->", dp,
+                    "seq", sq, "payload", pl, repr(p[42:42 + pl]),
+                )
 finally:
     if st is not None:
         st.kill()
