@@ -92,18 +92,26 @@ try:
     seen = set()
     parsed = []
     for p in pkts:
-        if len(p) > 40 and p[23] == 6:
-            sp, dp, sq = struct.unpack("!HHI", p[34:42])
-            ihl = (p[14] & 0x0F) * 4
-            doff = (p[14 + ihl + 12] >> 4) * 4
-            off = 14 + ihl + doff
-            pl = len(p) - off
-            k = (sp, dp, sq, pl)
-            if k in seen:
-                continue
-            seen.add(k)
-            if PORT in (sp, dp):
-                parsed.append((sp, dp, sq, pl, off, p))
+        if len(p) < 54:
+            continue
+        if p[12:14] != b"\x08\x00":
+            continue
+        if p[23] != 6:
+            continue
+        ihl = (p[14] & 0x0F) * 4
+        tcp_off = 14 + ihl
+        if len(p) < tcp_off + 20:
+            continue
+        sp, dp, sq = struct.unpack("!HHI", p[tcp_off:tcp_off + 8])
+        doff = (p[tcp_off + 12] >> 4) * 4
+        off = tcp_off + doff
+        pl = len(p) - off
+        k = (sp, dp, sq, pl)
+        if k in seen:
+            continue
+        seen.add(k)
+        if PORT in (sp, dp):
+            parsed.append((sp, dp, sq, pl, off, p))
 
     sends = []
     with open(LOG) as f:
