@@ -96,13 +96,14 @@ try:
             sp, dp, sq = struct.unpack("!HHI", p[34:42])
             ihl = (p[14] & 0x0F) * 4
             doff = (p[14 + ihl + 12] >> 4) * 4
-            pl = len(p) - 14 - ihl - doff
+            off = 14 + ihl + doff
+            pl = len(p) - off
             k = (sp, dp, sq, pl)
             if k in seen:
                 continue
             seen.add(k)
             if PORT in (sp, dp):
-                parsed.append((sp, dp, sq, pl, p))
+                parsed.append((sp, dp, sq, pl, off, p))
 
     sends = []
     with open(LOG) as f:
@@ -128,12 +129,12 @@ try:
                 int(rp, 16),
             )
             print("  conn", ls, "->", rs)
-        for sp, dp, sq, pl, p in parsed:
+        for sp, dp, sq, pl, off, p in parsed:
             if pl == nb:
                 d = "->" if dp == PORT else "<-"
                 print(
                     "  pkt", d, sp, "->", dp,
-                    "seq", sq, "payload", pl, repr(p[42:42 + pl]),
+                    "seq", sq, "payload", pl, repr(p[off:off + pl]),
                 )
 finally:
     if st is not None:
