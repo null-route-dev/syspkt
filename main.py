@@ -121,6 +121,7 @@ try:
             if m and n and "send" in line:
                 sends.append((m.group(1), int(n.group(1))))
 
+    matched = 0
     for ino, nb in sends:
         print("sendto", nb, "bytes")
         if ino in conns:
@@ -139,6 +140,7 @@ try:
             print("  conn", ls, "->", rs)
         for sp, dp, sq, pl, off, p in parsed:
             if pl == nb:
+                matched += 1
                 d = "->" if dp == PORT else "<-"
                 print(
                     "  pkt", d, sp, "->", dp,
@@ -155,3 +157,6 @@ finally:
         sn.close()
     if os.path.exists(LOG):
         os.remove(LOG)
+
+if matched == 0:
+    sys.exit(1)
