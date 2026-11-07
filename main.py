@@ -122,11 +122,14 @@ try:
                 sends.append((m.group(1), int(n.group(1))))
 
     matched = 0
+    printed_inodes = set()
     for ino, nb in sends:
         print("sendto", nb, "bytes")
         if ino in conns:
             lh, lp = conns[ino][0].split(":")
             rh, rp = conns[ino][1].split(":")
+            lport = int(lp, 16)
+            rport = int(rp, 16)
             ls = "%d.%d.%d.%d:%d" % (
                 int(lh[6:8], 16), int(lh[4:6], 16),
                 int(lh[2:4], 16), int(lh[0:2], 16),
@@ -138,14 +141,24 @@ try:
                 int(rp, 16),
             )
             print("  conn", ls, "->", rs)
-        for sp, dp, sq, pl, off, p in parsed:
-            if pl == nb:
-                matched += 1
-                d = "->" if dp == PORT else "<-"
-                print(
-                    "  pkt", d, sp, "->", dp,
-                    "seq", sq, "payload", pl, repr(p[off:off + pl]),
-                )
+            if ino not in printed_inodes:
+                printed_inodes.add(ino)
+                events = []
+                for sp, dp, sq, pl, off, p in parsed:
+                    if sp == lport and dp == rport:
+                        events.append((sq, pl, off, p))
+                events.sort()
+                for sq, pl, off, p in events:
+                    if pl == 0:
+                        print("  ctrl ->", lport, "->", rport, "seq", sq)
+                    else:
+                        print(
+                            "  pkt  ->", lport, "->", rport,
+                            "seq", sq, "payload", pl, repr(p[off:off + pl]),
+                        )
+            matched += 1
+        else:
+            matched += 1
 finally:
     if st is not None:
         st.kill()
