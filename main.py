@@ -105,13 +105,14 @@ try:
         sp, dp, sq = struct.unpack("!HHI", p[tcp_off:tcp_off + 8])
         doff = (p[tcp_off + 12] >> 4) * 4
         off = tcp_off + doff
+        fl = p[tcp_off + 13]
         pl = len(p) - off
         k = (sp, dp, sq, pl)
         if k in seen:
             continue
         seen.add(k)
         if PORT in (sp, dp):
-            parsed.append((sp, dp, sq, pl, off, p))
+            parsed.append((sp, dp, sq, pl, off, fl, p))
 
     sends = []
     with open(LOG) as f:
@@ -144,16 +145,30 @@ try:
             if ino not in printed_inodes:
                 printed_inodes.add(ino)
                 events = []
-                for sp, dp, sq, pl, off, p in parsed:
+                for sp, dp, sq, pl, off, fl, p in parsed:
                     if sp == lport and dp == rport:
-                        events.append((sq, pl, off, p))
+                        events.append((sq, pl, off, fl, p))
                 events.sort()
-                for sq, pl, off, p in events:
+                for sq, pl, off, fl, p in events:
+                    fs = []
+                    if fl & 0x02:
+                        fs.append("SYN")
+                    if fl & 0x01:
+                        fs.append("FIN")
+                    if fl & 0x04:
+                        fs.append("RST")
+                    if fl & 0x08:
+                        fs.append("PSH")
+                    if fl & 0x10:
+                        fs.append("ACK")
+                    if fl & 0x20:
+                        fs.append("URG")
+                    fs = "-".join(fs) if fs else "NONE"
                     if pl == 0:
-                        print("  ctrl ->", lport, "->", rport, "seq", sq)
+                        print("  %s ->" % fs, lport, "->", rport, "seq", sq)
                     else:
                         print(
-                            "  pkt  ->", lport, "->", rport,
+                            "  %s ->" % fs, lport, "->", rport,
                             "seq", sq, "payload", pl, repr(p[off:off + pl]),
                         )
             matched += 1
