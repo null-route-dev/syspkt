@@ -30,7 +30,6 @@ LOG = "/tmp/t.log"
 
 _log("verbose on")
 _log("host=%s port=%d msg=%r" % (HOST, PORT, MSG))
-_log("log file=%s" % LOG)
 
 SRV_CODE = (
     "import socket; "
@@ -65,11 +64,8 @@ try:
         capture_output=True,
         timeout=5,
     )
-    _log("pkill done")
-except FileNotFoundError:
-    _log("pkill not found, skipped")
-except subprocess.TimeoutExpired:
-    _log("pkill timed out, skipped")
+except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+    _log("pkill skipped: %s" % e)
 
 srv = None
 st = None
@@ -132,31 +128,41 @@ try:
             _log("strace still running, t=%.1fs" % (time.time() - st_start))
     st = None
 
-    _log("capturing packets")
+    _log("capturing packets (port filter, 3s deadline)")
     pkts = []
-    try:
-        while True:
-            pkts.append(sn.recvfrom(65535)[0])
-    except socket.timeout:
-        pass
+    deadline = time.time() + 3.0
+    read_total = 0
+    while time.time() < deadline:
+        try:
+            data = sn.recvfrom(65535)[0]
+        except socket.timeout:
+            _log("  timeout after %d raw reads, %d matched" % (read_total, len(pkts)))
+            break
+        read_total += 1
+        if len(data) < 54:
+            continue
+        if data[12:14] != b"\x08\x00":
+            continue
+        if data[23] != 6:
+            continue
+        ihl = (data[14] & 0x0F) * 4
+        tcp_off = 14 + ihl
+        if len(data) < tcp_off + 4:
+            continue
+        sp, dp = struct.unpack("!HH", data[tcp_off:tcp_off + 4])
+        if PORT not in (sp, dp):
+            continue
+        pkts.append(data)
     sn.close()
     sn = None
-    _log("captured %d packets" % len(pkts))
+    _log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), PORT, read_total))
 
     _log("parsing packets")
     seen = set()
     parsed = []
     for p in pkts:
-        if len(p) < 54:
-            continue
-        if p[12:14] != b"\x08\x00":
-            continue
-        if p[23] != 6:
-            continue
         ihl = (p[14] & 0x0F) * 4
         tcp_off = 14 + ihl
-        if len(p) < tcp_off + 20:
-            continue
         sp, dp, sq = struct.unpack("!HHI", p[tcp_off:tcp_off + 8])
         doff = (p[tcp_off + 12] >> 4) * 4
         off = tcp_off + doff
@@ -166,9 +172,8 @@ try:
         if k in seen:
             continue
         seen.add(k)
-        if PORT in (sp, dp):
-            parsed.append((sp, dp, sq, pl, off, fl, p))
-    _log("parsed %d tcp packets on port %d" % (len(parsed), PORT))
+        parsed.append((sp, dp, sq, pl, off, fl, p))
+    _log("parsed %d unique packets" % len(parsed))
 
     _log("reading strace log")
     sends = []
@@ -255,37 +260,25 @@ except Exception as e:
 finally:
     _log("entering finally")
     if st is not None:
-        _log("killing strace pid=%d" % st.pid)
         try:
             st.kill()
-        except OSError:
-            pass
-        try:
             st.wait(timeout=2)
-            _log("strace reaped")
-        except subprocess.TimeoutExpired:
-            _log("strace did not exit after kill")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     if srv is not None:
-        _log("killing server pid=%d" % srv.pid)
         try:
             srv.kill()
-        except OSError:
-            pass
-        try:
             srv.wait(timeout=2)
-            _log("server reaped")
-        except subprocess.TimeoutExpired:
-            _log("server did not exit after kill")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     if sn is not None:
-        _log("closing raw socket")
         try:
             sn.close()
         except OSError:
             pass
-    _log("removing log")
     try:
         if os.path.exists(LOG):
             os.remove(LOG)
-    except OSError as e:
-        _log("remove failed: %s" % e)
+    except OSError:
+        pass
     _log("cleanup done")
