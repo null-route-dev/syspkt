@@ -4,6 +4,7 @@ import re
 import socket
 import struct
 import subprocess
+import threading
 import time
 
 START = time.time()
@@ -70,6 +71,36 @@ except (FileNotFoundError, subprocess.TimeoutExpired) as e:
 srv = None
 st = None
 sn = None
+cap_thread = None
+stop_capture = threading.Event()
+stats = {"reads": 0, "matched": 0}
+
+
+def _capture(sock, port, out, stats, stop):
+    while not stop.is_set():
+        try:
+            data = sock.recvfrom(65535)[0]
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        stats["reads"] += 1
+        if len(data) < 54:
+            continue
+        if data[12:14] != b"\x08\x00":
+            continue
+        if data[23] != 6:
+            continue
+        ihl = (data[14] & 0x0F) * 4
+        tcp_off = 14 + ihl
+        if len(data) < tcp_off + 4:
+            continue
+        sp, dp = struct.unpack("!HH", data[tcp_off:tcp_off + 4])
+        if port not in (sp, dp):
+            continue
+        out.append(data)
+        stats["matched"] += 1
+
 
 try:
     _log("removing old log")
@@ -93,7 +124,20 @@ try:
     sn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
     sn.bind(("lo", 0))
     sn.settimeout(.1)
-    _log("raw socket bound")
+    try:
+        sn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
+        _log("SO_RCVBUF set to 32MB")
+    except OSError as e:
+        _log("SO_RCVBUF failed: %s" % e)
+
+    pkts = []
+    cap_thread = threading.Thread(
+        target=_capture,
+        args=(sn, PORT, pkts, stats, stop_capture),
+        daemon=True,
+    )
+    cap_thread.start()
+    _log("capture thread started")
 
     _log("spawning strace")
     st = subprocess.Popen(
@@ -128,34 +172,13 @@ try:
             _log("strace still running, t=%.1fs" % (time.time() - st_start))
     st = None
 
-    _log("capturing packets (port filter, 3s deadline)")
-    pkts = []
-    deadline = time.time() + 3.0
-    read_total = 0
-    while time.time() < deadline:
-        try:
-            data = sn.recvfrom(65535)[0]
-        except socket.timeout:
-            _log("  timeout after %d raw reads, %d matched" % (read_total, len(pkts)))
-            break
-        read_total += 1
-        if len(data) < 54:
-            continue
-        if data[12:14] != b"\x08\x00":
-            continue
-        if data[23] != 6:
-            continue
-        ihl = (data[14] & 0x0F) * 4
-        tcp_off = 14 + ihl
-        if len(data) < tcp_off + 4:
-            continue
-        sp, dp = struct.unpack("!HH", data[tcp_off:tcp_off + 4])
-        if PORT not in (sp, dp):
-            continue
-        pkts.append(data)
+    _log("stopping capture thread")
+    stop_capture.set()
+    cap_thread.join(timeout=2)
+    cap_thread = None
     sn.close()
     sn = None
-    _log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), PORT, read_total))
+    _log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), PORT, stats["reads"]))
 
     _log("parsing packets")
     seen = set()
@@ -259,6 +282,9 @@ except Exception as e:
 
 finally:
     _log("entering finally")
+    stop_capture.set()
+    if cap_thread is not None:
+        cap_thread.join(timeout=2)
     if st is not None:
         try:
             st.kill()
