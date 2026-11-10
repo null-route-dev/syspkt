@@ -44,13 +44,13 @@ SRV_CODE = (
 ) % (HOST, PORT)
 
 CLI_CODE = (
-    "import socket, struct, time; "
+    "import socket, struct, sys, time; "
     "s=socket.create_connection((\"%s\", %d)); "
     "s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)); "
     "time.sleep(1); "
-    "s.send(b\"%s\"); "
+    "s.send(bytes.fromhex(\"%s\")); "
     "s.close()"
-) % (HOST, PORT, MSG.decode())
+) % (HOST, PORT, MSG.hex())
 
 print("start", flush=True)
 
