@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import re
@@ -9,18 +10,27 @@ import time
 
 START = time.time()
 VERBOSE = False
+JSON_OUT = False
 
 
 def _log(msg):
-    if VERBOSE:
+    if VERBOSE and not JSON_OUT:
         sys.stderr.write("[%7.3f] %s\n" % (time.time() - START, msg))
         sys.stderr.flush()
+
+
+def _emit(obj):
+    if JSON_OUT:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
 
 
 raw = []
 for a in sys.argv[1:]:
     if a in ("-v", "--verbose"):
         VERBOSE = True
+    elif a == "--json":
+        JSON_OUT = True
     else:
         raw.append(a)
 
@@ -30,6 +40,7 @@ MSG = raw[2].encode() if len(raw) > 2 else b"hello"
 LOG = "/tmp/t.log"
 
 _log("verbose on")
+_log("json=%r verbose=%r" % (JSON_OUT, VERBOSE))
 _log("host=%s port=%d msg=%r" % (HOST, PORT, MSG))
 
 SRV_CODE = (
@@ -52,7 +63,8 @@ CLI_CODE = (
     "s.close()"
 ) % (HOST, PORT, MSG.hex())
 
-print("start", flush=True)
+if not JSON_OUT:
+    print("start", flush=True)
 
 _log("pkill old servers")
 try:
@@ -100,6 +112,23 @@ def _capture(sock, port, out, stats, stop):
             continue
         out.append(data)
         stats["matched"] += 1
+
+
+def _flags(fl):
+    fs = []
+    if fl & 0x02:
+        fs.append("SYN")
+    if fl & 0x01:
+        fs.append("FIN")
+    if fl & 0x04:
+        fs.append("RST")
+    if fl & 0x08:
+        fs.append("PSH")
+    if fl & 0x10:
+        fs.append("ACK")
+    if fl & 0x20:
+        fs.append("URG")
+    return fs
 
 
 try:
@@ -212,9 +241,11 @@ try:
     matched = 0
     printed_inodes = set()
     for ino, nb in sends:
-        print("sendto", nb, "bytes", flush=True)
+        if not JSON_OUT:
+            print("sendto", nb, "bytes", flush=True)
         if ino not in conns:
             _log("inode %s not in conns, skipped" % ino)
+            _emit({"type": "sendto", "bytes": nb, "matched": False})
             continue
         lh, lp = conns[ino][0].split(":")
         rh, rp = conns[ino][1].split(":")
@@ -230,7 +261,9 @@ try:
             int(rh[2:4], 16), int(rh[0:2], 16),
             int(rp, 16),
         )
-        print("  conn", ls, "->", rs, flush=True)
+        if not JSON_OUT:
+            print("  conn", ls, "->", rs, flush=True)
+        _emit({"type": "conn", "src": ls, "dst": rs})
         events = []
         for sp, dp, sq, pl, off, fl, p in parsed:
             if sp == lport and dp == rport:
@@ -239,33 +272,38 @@ try:
         if ino not in printed_inodes:
             printed_inodes.add(ino)
             for sq, pl, off, fl, p in events:
-                fs = []
-                if fl & 0x02:
-                    fs.append("SYN")
-                if fl & 0x01:
-                    fs.append("FIN")
-                if fl & 0x04:
-                    fs.append("RST")
-                if fl & 0x08:
-                    fs.append("PSH")
-                if fl & 0x10:
-                    fs.append("ACK")
-                if fl & 0x20:
-                    fs.append("URG")
-                fs = "-".join(fs) if fs else "NONE"
-                if pl == 0:
-                    print("  %s ->" % fs, lport, "->", rport, "seq", sq, flush=True)
-                else:
-                    print(
-                        "  %s ->" % fs, lport, "->", rport,
-                        "seq", sq, "payload", pl,
-                        repr(p[off:off + pl]),
-                        flush=True,
-                    )
+                fs = _flags(fl)
+                if not JSON_OUT:
+                    fs_s = "-".join(fs) if fs else "NONE"
+                    if pl == 0:
+                        print("  %s ->" % fs_s, lport, "->", rport, "seq", sq, flush=True)
+                    else:
+                        print(
+                            "  %s ->" % fs_s, lport, "->", rport,
+                            "seq", sq, "payload", pl,
+                            repr(p[off:off + pl]),
+                            flush=True,
+                        )
+                _emit({
+                    "type": "packet",
+                    "src": "%d.%d.%d.%d:%d" % (
+                        int(p[26]), int(p[27]), int(p[28]), int(p[29]), lport,
+                    ),
+                    "dst": "%d.%d.%d.%d:%d" % (
+                        int(p[30]), int(p[31]), int(p[32]), int(p[33]), rport,
+                    ),
+                    "seq": sq,
+                    "flags": fs,
+                    "payload_len": pl,
+                    "payload": p[off:off + pl].decode("utf-8", "replace") if pl > 0 else "",
+                })
+        hit = False
         for sq, pl, off, fl, p in events:
             if pl == nb:
                 matched += 1
+                hit = True
                 break
+        _emit({"type": "sendto", "bytes": nb, "matched": hit})
     _log("matched %d sendto calls" % matched)
 
     if matched == 0:
@@ -273,7 +311,9 @@ try:
         sys.exit(1)
 
 except KeyboardInterrupt:
-    print("\ninterrupted", flush=True)
+    if not JSON_OUT:
+        print("\ninterrupted", flush=True)
+    _emit({"type": "interrupted"})
     sys.exit(130)
 
 except Exception as e:
