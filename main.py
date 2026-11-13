@@ -203,6 +203,7 @@ try:
             "-o", LOG, "python3", "-c", CLI_CODE,
         ],
     )
+    st_start = time.time()
     _log("strace pid=%d" % st.pid)
 
     _log("polling /proc/net/tcp")
@@ -215,28 +216,33 @@ try:
                     conns[p[9]] = (p[1], p[2])
         if i % 10 == 0:
             _log("  poll %d/30, %d conns" % (i, len(conns)))
+        if TIMEOUT is not None and time.time() - st_start > TIMEOUT:
+            _log("timeout during polling, killing strace")
+            timed_out = True
+            st.kill()
+            break
         time.sleep(.05)
     _log("collected %d conns" % len(conns))
 
-    _log("waiting for strace (timeout=%r)" % TIMEOUT)
-    st_start = time.time()
-    while True:
-        try:
-            st.wait(timeout=0.5)
-            _log("strace finished rc=%d after %.2fs" % (st.returncode, time.time() - st_start))
-            break
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - st_start
-            _log("strace still running, t=%.1fs" % elapsed)
-            if TIMEOUT is not None and elapsed > TIMEOUT:
-                _log("timeout exceeded, killing strace")
-                timed_out = True
-                st.kill()
-                try:
-                    st.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    _log("strace did not die after kill")
+    if not timed_out:
+        _log("waiting for strace (timeout=%r)" % TIMEOUT)
+        while True:
+            try:
+                st.wait(timeout=0.5)
+                _log("strace finished rc=%d after %.2fs" % (st.returncode, time.time() - st_start))
                 break
+            except subprocess.TimeoutExpired:
+                elapsed = time.time() - st_start
+                _log("strace still running, t=%.1fs" % elapsed)
+                if TIMEOUT is not None and elapsed > TIMEOUT:
+                    _log("timeout exceeded, killing strace")
+                    timed_out = True
+                    st.kill()
+                    try:
+                        st.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        _log("strace did not die after kill")
+                    break
     st = None
 
     _log("stopping capture thread")
