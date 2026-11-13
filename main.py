@@ -11,6 +11,7 @@ import time
 START = time.time()
 VERBOSE = False
 JSON_OUT = False
+TIMEOUT = None
 
 
 def _log(msg):
@@ -26,13 +27,39 @@ def _emit(obj):
 
 
 raw = []
-for a in sys.argv[1:]:
+i = 0
+argv = sys.argv[1:]
+while i < len(argv):
+    a = argv[i]
     if a in ("-v", "--verbose"):
         VERBOSE = True
     elif a == "--json":
         JSON_OUT = True
+    elif a == "--timeout":
+        i += 1
+        if i >= len(argv):
+            sys.stderr.write("--timeout requires a value\n")
+            sys.exit(2)
+        try:
+            TIMEOUT = float(argv[i])
+        except ValueError:
+            sys.stderr.write("bad --timeout value: %s\n" % argv[i])
+            sys.exit(2)
+        if TIMEOUT <= 0:
+            sys.stderr.write("--timeout must be positive\n")
+            sys.exit(2)
+    elif a.startswith("--timeout="):
+        try:
+            TIMEOUT = float(a.split("=", 1)[1])
+        except ValueError:
+            sys.stderr.write("bad --timeout value: %s\n" % a)
+            sys.exit(2)
+        if TIMEOUT <= 0:
+            sys.stderr.write("--timeout must be positive\n")
+            sys.exit(2)
     else:
         raw.append(a)
+    i += 1
 
 HOST = raw[0] if len(raw) > 0 else "127.0.0.1"
 PORT = int(raw[1]) if len(raw) > 1 else 9999
@@ -40,7 +67,7 @@ MSG = raw[2].encode() if len(raw) > 2 else b"hello"
 LOG = "/tmp/t.log"
 
 _log("verbose on")
-_log("json=%r verbose=%r" % (JSON_OUT, VERBOSE))
+_log("json=%r verbose=%r timeout=%r" % (JSON_OUT, VERBOSE, TIMEOUT))
 _log("host=%s port=%d msg=%r" % (HOST, PORT, MSG))
 
 SRV_CODE = (
@@ -86,6 +113,7 @@ sn = None
 cap_thread = None
 stop_capture = threading.Event()
 stats = {"reads": 0, "matched": 0}
+timed_out = False
 
 
 def _capture(sock, port, out, stats, stop):
@@ -190,7 +218,7 @@ try:
         time.sleep(.05)
     _log("collected %d conns" % len(conns))
 
-    _log("waiting for strace")
+    _log("waiting for strace (timeout=%r)" % TIMEOUT)
     st_start = time.time()
     while True:
         try:
@@ -198,7 +226,17 @@ try:
             _log("strace finished rc=%d after %.2fs" % (st.returncode, time.time() - st_start))
             break
         except subprocess.TimeoutExpired:
-            _log("strace still running, t=%.1fs" % (time.time() - st_start))
+            elapsed = time.time() - st_start
+            _log("strace still running, t=%.1fs" % elapsed)
+            if TIMEOUT is not None and elapsed > TIMEOUT:
+                _log("timeout exceeded, killing strace")
+                timed_out = True
+                st.kill()
+                try:
+                    st.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _log("strace did not die after kill")
+                break
     st = None
 
     _log("stopping capture thread")
@@ -208,6 +246,12 @@ try:
     sn.close()
     sn = None
     _log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), PORT, stats["reads"]))
+
+    if timed_out:
+        if not JSON_OUT:
+            print("timeout after %.1fs" % TIMEOUT, flush=True)
+        _emit({"type": "timeout", "after": TIMEOUT})
+        sys.exit(124)
 
     _log("parsing packets")
     seen = set()
