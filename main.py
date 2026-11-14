@@ -12,6 +12,7 @@ START = time.time()
 VERBOSE = False
 JSON_OUT = False
 TIMEOUT = None
+IFACE = "lo"
 
 
 def _log(msg):
@@ -48,15 +49,12 @@ while i < len(argv):
         if TIMEOUT <= 0:
             sys.stderr.write("--timeout must be positive\n")
             sys.exit(2)
-    elif a.startswith("--timeout="):
-        try:
-            TIMEOUT = float(a.split("=", 1)[1])
-        except ValueError:
-            sys.stderr.write("bad --timeout value: %s\n" % a)
+    elif a == "--iface":
+        i += 1
+        if i >= len(argv):
+            sys.stderr.write("--iface requires a value\n")
             sys.exit(2)
-        if TIMEOUT <= 0:
-            sys.stderr.write("--timeout must be positive\n")
-            sys.exit(2)
+        IFACE = argv[i]
     else:
         raw.append(a)
     i += 1
@@ -67,8 +65,27 @@ MSG = raw[2].encode() if len(raw) > 2 else b"hello"
 LOG = "/tmp/t.log"
 
 _log("verbose on")
-_log("json=%r verbose=%r timeout=%r" % (JSON_OUT, VERBOSE, TIMEOUT))
+_log("json=%r verbose=%r timeout=%r iface=%r" % (JSON_OUT, VERBOSE, TIMEOUT, IFACE))
 _log("host=%s port=%d msg=%r" % (HOST, PORT, MSG))
+
+if IFACE and IFACE not in ("any", "*"):
+    try:
+        _test = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+    except PermissionError:
+        sys.stderr.write("need root or CAP_NET_RAW\n")
+        sys.exit(1)
+    try:
+        _test.bind((IFACE, 0))
+    except OSError as e:
+        sys.stderr.write("cannot use interface %r: %s\n" % (IFACE, e))
+        try:
+            names = sorted(os.listdir("/sys/class/net"))
+            sys.stderr.write("available interfaces: %s\n" % ", ".join(names))
+        except OSError:
+            pass
+        sys.exit(1)
+    finally:
+        _test.close()
 
 SRV_CODE = (
     "import socket; "
@@ -119,7 +136,7 @@ timed_out = False
 def _capture(sock, port, out, stats, stop):
     while not stop.is_set():
         try:
-            data = sock.recvfrom(65535)[0]
+            data, addr = sock.recvfrom(65535)
         except socket.timeout:
             continue
         except OSError:
@@ -177,9 +194,10 @@ try:
     time.sleep(.5)
     _log("server warm-up done, poll=%r" % srv.poll())
 
-    _log("binding raw socket on lo")
+    _log("binding raw socket on %s" % IFACE)
     sn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
-    sn.bind(("lo", 0))
+    if IFACE and IFACE not in ("any", "*"):
+        sn.bind((IFACE, 0))
     sn.settimeout(.1)
     try:
         sn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
