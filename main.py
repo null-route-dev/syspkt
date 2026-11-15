@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import sys
@@ -15,6 +16,52 @@ TIMEOUT = None
 IFACE = "lo"
 
 
+def _positive_float(s):
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError("bad timeout value: %s" % s)
+    if v <= 0:
+        raise argparse.ArgumentTypeError("timeout must be positive")
+    return v
+
+
+def _parse_argv(argv):
+    p = argparse.ArgumentParser(
+        prog="syspkt",
+        description="Correlate sendto() syscalls with TCP packets on the wire.",
+    )
+    p.add_argument(
+        "host", nargs="?", default="127.0.0.1",
+        help="host to connect to (default: 127.0.0.1)",
+    )
+    p.add_argument(
+        "port", nargs="?", type=int, default=9999,
+        help="port to connect to (default: 9999)",
+    )
+    p.add_argument(
+        "msg", nargs="?", default="hello",
+        help="message to send (default: hello)",
+    )
+    p.add_argument(
+        "--iface", default="lo",
+        help="interface to capture on, or 'any' (default: lo)",
+    )
+    p.add_argument(
+        "--timeout", type=_positive_float, default=None,
+        help="max seconds to trace",
+    )
+    p.add_argument(
+        "--json", action="store_true",
+        help="output JSONL",
+    )
+    p.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="verbose progress",
+    )
+    return p.parse_args(argv)
+
+
 def _log(msg):
     if VERBOSE and not JSON_OUT:
         sys.stderr.write("[%7.3f] %s\n" % (time.time() - START, msg))
@@ -27,41 +74,15 @@ def _emit(obj):
         sys.stdout.flush()
 
 
-raw = []
-i = 0
-argv = sys.argv[1:]
-while i < len(argv):
-    a = argv[i]
-    if a in ("-v", "--verbose"):
-        VERBOSE = True
-    elif a == "--json":
-        JSON_OUT = True
-    elif a == "--timeout":
-        i += 1
-        if i >= len(argv):
-            sys.stderr.write("--timeout requires a value\n")
-            sys.exit(2)
-        try:
-            TIMEOUT = float(argv[i])
-        except ValueError:
-            sys.stderr.write("bad --timeout value: %s\n" % argv[i])
-            sys.exit(2)
-        if TIMEOUT <= 0:
-            sys.stderr.write("--timeout must be positive\n")
-            sys.exit(2)
-    elif a == "--iface":
-        i += 1
-        if i >= len(argv):
-            sys.stderr.write("--iface requires a value\n")
-            sys.exit(2)
-        IFACE = argv[i]
-    else:
-        raw.append(a)
-    i += 1
+args = _parse_argv(sys.argv[1:])
 
-HOST = raw[0] if len(raw) > 0 else "127.0.0.1"
-PORT = int(raw[1]) if len(raw) > 1 else 9999
-MSG = raw[2].encode() if len(raw) > 2 else b"hello"
+HOST = args.host
+PORT = args.port
+MSG = args.msg.encode()
+IFACE = args.iface
+TIMEOUT = args.timeout
+VERBOSE = args.verbose
+JSON_OUT = args.json
 LOG = "/tmp/t.log"
 
 _log("verbose on")
