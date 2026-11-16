@@ -74,6 +74,63 @@ def _emit(obj):
         sys.stdout.flush()
 
 
+def _parse_packet(data):
+    if len(data) < 54:
+        return None
+    if data[12:14] != b"\x08\x00":
+        return None
+    if data[23] != 6:
+        return None
+    ihl = (data[14] & 0x0F) * 4
+    tcp_off = 14 + ihl
+    if len(data) < tcp_off + 20:
+        return None
+    sp, dp, sq = struct.unpack("!HHI", data[tcp_off:tcp_off + 8])
+    doff = (data[tcp_off + 12] >> 4) * 4
+    off = tcp_off + doff
+    fl = data[tcp_off + 13]
+    pl = len(data) - off
+    if pl < 0:
+        return None
+    return sp, dp, sq, pl, off, fl
+
+
+def _capture(sock, port, out, stats, stop):
+    while not stop.is_set():
+        try:
+            data, addr = sock.recvfrom(65535)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        stats["reads"] += 1
+        info = _parse_packet(data)
+        if info is None:
+            continue
+        sp, dp = info[0], info[1]
+        if port not in (sp, dp):
+            continue
+        out.append(data)
+        stats["matched"] += 1
+
+
+def _flags(fl):
+    fs = []
+    if fl & 0x02:
+        fs.append("SYN")
+    if fl & 0x01:
+        fs.append("FIN")
+    if fl & 0x04:
+        fs.append("RST")
+    if fl & 0x08:
+        fs.append("PSH")
+    if fl & 0x10:
+        fs.append("ACK")
+    if fl & 0x20:
+        fs.append("URG")
+    return fs
+
+
 args = _parse_argv(sys.argv[1:])
 
 HOST = args.host
@@ -152,50 +209,6 @@ cap_thread = None
 stop_capture = threading.Event()
 stats = {"reads": 0, "matched": 0}
 timed_out = False
-
-
-def _capture(sock, port, out, stats, stop):
-    while not stop.is_set():
-        try:
-            data, addr = sock.recvfrom(65535)
-        except socket.timeout:
-            continue
-        except OSError:
-            break
-        stats["reads"] += 1
-        if len(data) < 54:
-            continue
-        if data[12:14] != b"\x08\x00":
-            continue
-        if data[23] != 6:
-            continue
-        ihl = (data[14] & 0x0F) * 4
-        tcp_off = 14 + ihl
-        if len(data) < tcp_off + 4:
-            continue
-        sp, dp = struct.unpack("!HH", data[tcp_off:tcp_off + 4])
-        if port not in (sp, dp):
-            continue
-        out.append(data)
-        stats["matched"] += 1
-
-
-def _flags(fl):
-    fs = []
-    if fl & 0x02:
-        fs.append("SYN")
-    if fl & 0x01:
-        fs.append("FIN")
-    if fl & 0x04:
-        fs.append("RST")
-    if fl & 0x08:
-        fs.append("PSH")
-    if fl & 0x10:
-        fs.append("ACK")
-    if fl & 0x20:
-        fs.append("URG")
-    return fs
-
 
 try:
     _log("removing old log")
@@ -301,19 +314,18 @@ try:
     _log("parsing packets")
     seen = set()
     parsed = []
-    for p in pkts:
-        ihl = (p[14] & 0x0F) * 4
-        tcp_off = 14 + ihl
-        sp, dp, sq = struct.unpack("!HHI", p[tcp_off:tcp_off + 8])
-        doff = (p[tcp_off + 12] >> 4) * 4
-        off = tcp_off + doff
-        fl = p[tcp_off + 13]
-        pl = len(p) - off
+    for data in pkts:
+        info = _parse_packet(data)
+        if info is None:
+            continue
+        sp, dp, sq, pl, off, fl = info
+        if PORT not in (sp, dp):
+            continue
         k = (sp, dp, sq, pl)
         if k in seen:
             continue
         seen.add(k)
-        parsed.append((sp, dp, sq, pl, off, fl, p))
+        parsed.append((sp, dp, sq, pl, off, fl, data))
     _log("parsed %d unique packets" % len(parsed))
 
     _log("reading strace log")
