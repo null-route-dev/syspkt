@@ -95,6 +95,21 @@ def _parse_packet(data):
     return sp, dp, sq, pl, off, fl
 
 
+def _parse_strace_log(path):
+    sends = []
+    try:
+        f = open(path)
+    except FileNotFoundError:
+        return sends
+    with f:
+        for line in f:
+            m = re.search(r"socket:\[(\d+)\]", line)
+            n = re.search(r"=\s*(\d+)\s*$", line)
+            if m and n and "send" in line:
+                sends.append((m.group(1), int(n.group(1))))
+    return sends
+
+
 def _capture(sock, port, out, stats, stop):
     while not stop.is_set():
         try:
@@ -329,13 +344,7 @@ try:
     _log("parsed %d unique packets" % len(parsed))
 
     _log("reading strace log")
-    sends = []
-    with open(LOG) as f:
-        for line in f:
-            m = re.search(r"socket:\[(\d+)\]", line)
-            n = re.search(r"=\s*(\d+)\s*$", line)
-            if m and n and "send" in line:
-                sends.append((m.group(1), int(n.group(1))))
+    sends = _parse_strace_log(LOG)
     _log("read %d send() calls" % len(sends))
 
     _log("matching")
