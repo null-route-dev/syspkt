@@ -110,6 +110,28 @@ def _parse_strace_log(path):
     return sends
 
 
+def _poll_proc_net_tcp(duration=1.5, timeout_at=None):
+    conns = {}
+    start = time.time()
+    i = 0
+    while time.time() - start < duration:
+        try:
+            with open("/proc/net/tcp") as f:
+                for r in f.read().split("\n")[1:]:
+                    p = r.split()
+                    if len(p) > 9:
+                        conns[p[9]] = (p[1], p[2])
+        except (FileNotFoundError, OSError):
+            pass
+        if i % 10 == 0:
+            _log("  poll %d, %d conns" % (i, len(conns)))
+        if timeout_at is not None and time.time() > timeout_at:
+            return conns, True
+        time.sleep(.05)
+        i += 1
+    return conns, False
+
+
 def _capture(sock, port, out, stats, stop):
     while not stop.is_set():
         try:
@@ -274,24 +296,18 @@ try:
     _log("strace pid=%d" % st.pid)
 
     _log("polling /proc/net/tcp")
-    conns = {}
-    for i in range(30):
-        with open("/proc/net/tcp") as f:
-            for r in f.read().split("\n")[1:]:
-                p = r.split()
-                if len(p) > 9:
-                    conns[p[9]] = (p[1], p[2])
-        if i % 10 == 0:
-            _log("  poll %d/30, %d conns" % (i, len(conns)))
-        if TIMEOUT is not None and time.time() - st_start > TIMEOUT:
-            _log("timeout during polling, killing strace")
-            timed_out = True
-            st.kill()
-            break
-        time.sleep(.05)
+    timeout_at = (st_start + TIMEOUT) if TIMEOUT is not None else None
+    conns, timed_out = _poll_proc_net_tcp(duration=1.5, timeout_at=timeout_at)
     _log("collected %d conns" % len(conns))
 
-    if not timed_out:
+    if timed_out:
+        _log("timeout during polling, killing strace")
+        st.kill()
+        try:
+            st.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    else:
         _log("waiting for strace (timeout=%r)" % TIMEOUT)
         while True:
             try:
