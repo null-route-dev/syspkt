@@ -74,6 +74,28 @@ def _emit(obj):
         sys.stdout.flush()
 
 
+def _validate_iface(iface):
+    if not iface or iface in ("any", "*"):
+        return
+    try:
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+    except PermissionError:
+        sys.stderr.write("need root or CAP_NET_RAW\n")
+        sys.exit(1)
+    try:
+        sock.bind((iface, 0))
+    except OSError as e:
+        sys.stderr.write("cannot use interface %r: %s\n" % (iface, e))
+        try:
+            names = sorted(os.listdir("/sys/class/net"))
+            sys.stderr.write("available interfaces: %s\n" % ", ".join(names))
+        except OSError:
+            pass
+        sys.exit(1)
+    finally:
+        sock.close()
+
+
 def _parse_packet(data):
     if len(data) < 54:
         return None
@@ -253,24 +275,7 @@ _log("verbose on")
 _log("json=%r verbose=%r timeout=%r iface=%r" % (JSON_OUT, VERBOSE, TIMEOUT, IFACE))
 _log("host=%s port=%d msg=%r" % (HOST, PORT, MSG))
 
-if IFACE and IFACE not in ("any", "*"):
-    try:
-        _test = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
-    except PermissionError:
-        sys.stderr.write("need root or CAP_NET_RAW\n")
-        sys.exit(1)
-    try:
-        _test.bind((IFACE, 0))
-    except OSError as e:
-        sys.stderr.write("cannot use interface %r: %s\n" % (IFACE, e))
-        try:
-            names = sorted(os.listdir("/sys/class/net"))
-            sys.stderr.write("available interfaces: %s\n" % ", ".join(names))
-        except OSError:
-            pass
-        sys.exit(1)
-    finally:
-        _test.close()
+_validate_iface(IFACE)
 
 SRV_CODE = (
     "import socket; "
