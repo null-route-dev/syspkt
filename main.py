@@ -168,6 +168,76 @@ def _flags(fl):
     return fs
 
 
+def _match(sends, conns, parsed):
+    matched = 0
+    printed_inodes = set()
+    for ino, nb in sends:
+        if not JSON_OUT:
+            print("sendto", nb, "bytes", flush=True)
+        if ino not in conns:
+            _log("inode %s not in conns, skipped" % ino)
+            _emit({"type": "sendto", "bytes": nb, "matched": False})
+            continue
+        lh, lp = conns[ino][0].split(":")
+        rh, rp = conns[ino][1].split(":")
+        lport = int(lp, 16)
+        rport = int(rp, 16)
+        ls = "%d.%d.%d.%d:%d" % (
+            int(lh[6:8], 16), int(lh[4:6], 16),
+            int(lh[2:4], 16), int(lh[0:2], 16),
+            int(lp, 16),
+        )
+        rs = "%d.%d.%d.%d:%d" % (
+            int(rh[6:8], 16), int(rh[4:6], 16),
+            int(rh[2:4], 16), int(rh[0:2], 16),
+            int(rp, 16),
+        )
+        if not JSON_OUT:
+            print("  conn", ls, "->", rs, flush=True)
+        _emit({"type": "conn", "src": ls, "dst": rs})
+        events = []
+        for sp, dp, sq, pl, off, fl, p in parsed:
+            if sp == lport and dp == rport:
+                events.append((sq, pl, off, fl, p))
+        events.sort()
+        if ino not in printed_inodes:
+            printed_inodes.add(ino)
+            for sq, pl, off, fl, p in events:
+                fs = _flags(fl)
+                if not JSON_OUT:
+                    fs_s = "-".join(fs) if fs else "NONE"
+                    if pl == 0:
+                        print("  %s ->" % fs_s, lport, "->", rport, "seq", sq, flush=True)
+                    else:
+                        print(
+                            "  %s ->" % fs_s, lport, "->", rport,
+                            "seq", sq, "payload", pl,
+                            repr(p[off:off + pl]),
+                            flush=True,
+                        )
+                _emit({
+                    "type": "packet",
+                    "src": "%d.%d.%d.%d:%d" % (
+                        int(p[26]), int(p[27]), int(p[28]), int(p[29]), lport,
+                    ),
+                    "dst": "%d.%d.%d.%d:%d" % (
+                        int(p[30]), int(p[31]), int(p[32]), int(p[33]), rport,
+                    ),
+                    "seq": sq,
+                    "flags": fs,
+                    "payload_len": pl,
+                    "payload": p[off:off + pl].decode("utf-8", "replace") if pl > 0 else "",
+                })
+        hit = False
+        for sq, pl, off, fl, p in events:
+            if pl == nb:
+                matched += 1
+                hit = True
+                break
+        _emit({"type": "sendto", "bytes": nb, "matched": hit})
+    return matched
+
+
 args = _parse_argv(sys.argv[1:])
 
 HOST = args.host
@@ -298,10 +368,11 @@ try:
     _log("polling /proc/net/tcp")
     timeout_at = (st_start + TIMEOUT) if TIMEOUT is not None else None
     conns, timed_out = _poll_proc_net_tcp(duration=1.5, timeout_at=timeout_at)
+    if timed_out:
+        _log("timeout during polling, killing strace")
     _log("collected %d conns" % len(conns))
 
     if timed_out:
-        _log("timeout during polling, killing strace")
         st.kill()
         try:
             st.wait(timeout=2)
@@ -364,72 +435,7 @@ try:
     _log("read %d send() calls" % len(sends))
 
     _log("matching")
-    matched = 0
-    printed_inodes = set()
-    for ino, nb in sends:
-        if not JSON_OUT:
-            print("sendto", nb, "bytes", flush=True)
-        if ino not in conns:
-            _log("inode %s not in conns, skipped" % ino)
-            _emit({"type": "sendto", "bytes": nb, "matched": False})
-            continue
-        lh, lp = conns[ino][0].split(":")
-        rh, rp = conns[ino][1].split(":")
-        lport = int(lp, 16)
-        rport = int(rp, 16)
-        ls = "%d.%d.%d.%d:%d" % (
-            int(lh[6:8], 16), int(lh[4:6], 16),
-            int(lh[2:4], 16), int(lh[0:2], 16),
-            int(lp, 16),
-        )
-        rs = "%d.%d.%d.%d:%d" % (
-            int(rh[6:8], 16), int(rh[4:6], 16),
-            int(rh[2:4], 16), int(rh[0:2], 16),
-            int(rp, 16),
-        )
-        if not JSON_OUT:
-            print("  conn", ls, "->", rs, flush=True)
-        _emit({"type": "conn", "src": ls, "dst": rs})
-        events = []
-        for sp, dp, sq, pl, off, fl, p in parsed:
-            if sp == lport and dp == rport:
-                events.append((sq, pl, off, fl, p))
-        events.sort()
-        if ino not in printed_inodes:
-            printed_inodes.add(ino)
-            for sq, pl, off, fl, p in events:
-                fs = _flags(fl)
-                if not JSON_OUT:
-                    fs_s = "-".join(fs) if fs else "NONE"
-                    if pl == 0:
-                        print("  %s ->" % fs_s, lport, "->", rport, "seq", sq, flush=True)
-                    else:
-                        print(
-                            "  %s ->" % fs_s, lport, "->", rport,
-                            "seq", sq, "payload", pl,
-                            repr(p[off:off + pl]),
-                            flush=True,
-                        )
-                _emit({
-                    "type": "packet",
-                    "src": "%d.%d.%d.%d:%d" % (
-                        int(p[26]), int(p[27]), int(p[28]), int(p[29]), lport,
-                    ),
-                    "dst": "%d.%d.%d.%d:%d" % (
-                        int(p[30]), int(p[31]), int(p[32]), int(p[33]), rport,
-                    ),
-                    "seq": sq,
-                    "flags": fs,
-                    "payload_len": pl,
-                    "payload": p[off:off + pl].decode("utf-8", "replace") if pl > 0 else "",
-                })
-        hit = False
-        for sq, pl, off, fl, p in events:
-            if pl == nb:
-                matched += 1
-                hit = True
-                break
-        _emit({"type": "sendto", "bytes": nb, "matched": hit})
+    matched = _match(sends, conns, parsed)
     _log("matched %d sendto calls" % matched)
 
     if matched == 0:
