@@ -96,6 +96,19 @@ def _validate_iface(iface):
         sock.close()
 
 
+def _kill_proc(proc):
+    if proc is None:
+        return
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def _parse_packet(data):
     if len(data) < 54:
         return None
@@ -378,11 +391,7 @@ try:
     _log("collected %d conns" % len(conns))
 
     if timed_out:
-        st.kill()
-        try:
-            st.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
+        _kill_proc(st)
     else:
         _log("waiting for strace (timeout=%r)" % TIMEOUT)
         while True:
@@ -396,11 +405,7 @@ try:
                 if TIMEOUT is not None and elapsed > TIMEOUT:
                     _log("timeout exceeded, killing strace")
                     timed_out = True
-                    st.kill()
-                    try:
-                        st.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        _log("strace did not die after kill")
+                    _kill_proc(st)
                     break
     st = None
 
@@ -462,18 +467,8 @@ finally:
     stop_capture.set()
     if cap_thread is not None:
         cap_thread.join(timeout=2)
-    if st is not None:
-        try:
-            st.kill()
-            st.wait(timeout=2)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    if srv is not None:
-        try:
-            srv.kill()
-            srv.wait(timeout=2)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+    _kill_proc(st)
+    _kill_proc(srv)
     if sn is not None:
         try:
             sn.close()
