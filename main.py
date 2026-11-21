@@ -109,6 +109,30 @@ def _kill_proc(proc):
         pass
 
 
+def _build_srv_code(host, port):
+    return (
+        "import socket; "
+        "s=socket.socket(); "
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
+        "s.bind((\"%s\", %d)); "
+        "s.listen(1); "
+        "c,_=s.accept(); "
+        "c.recv(1024); "
+        "c.close()"
+    ) % (host, port)
+
+
+def _build_cli_code(host, port, msg_hex):
+    return (
+        "import socket, struct, sys, time; "
+        "s=socket.create_connection((\"%s\", %d)); "
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)); "
+        "time.sleep(1); "
+        "s.send(bytes.fromhex(\"%s\")); "
+        "s.close()"
+    ) % (host, port, msg_hex)
+
+
 def _parse_packet(data):
     if len(data) < 54:
         return None
@@ -290,25 +314,8 @@ _log("host=%s port=%d msg=%r" % (HOST, PORT, MSG))
 
 _validate_iface(IFACE)
 
-SRV_CODE = (
-    "import socket; "
-    "s=socket.socket(); "
-    "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
-    "s.bind((\"%s\", %d)); "
-    "s.listen(1); "
-    "c,_=s.accept(); "
-    "c.recv(1024); "
-    "c.close()"
-) % (HOST, PORT)
-
-CLI_CODE = (
-    "import socket, struct, sys, time; "
-    "s=socket.create_connection((\"%s\", %d)); "
-    "s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)); "
-    "time.sleep(1); "
-    "s.send(bytes.fromhex(\"%s\")); "
-    "s.close()"
-) % (HOST, PORT, MSG.hex())
+SRV_CODE = _build_srv_code(HOST, PORT)
+CLI_CODE = _build_cli_code(HOST, PORT, MSG.hex())
 
 if not JSON_OUT:
     print("start", flush=True)
