@@ -154,6 +154,24 @@ def _parse_packet(data):
     return sp, dp, sq, pl, off, fl
 
 
+def _parse_captured(pkts, port):
+    seen = set()
+    parsed = []
+    for data in pkts:
+        info = _parse_packet(data)
+        if info is None:
+            continue
+        sp, dp, sq, pl, off, fl = info
+        if port not in (sp, dp):
+            continue
+        k = (sp, dp, sq, pl)
+        if k in seen:
+            continue
+        seen.add(k)
+        parsed.append((sp, dp, sq, pl, off, fl, data))
+    return parsed
+
+
 def _parse_strace_log(path):
     sends = []
     try:
@@ -431,20 +449,7 @@ try:
         sys.exit(124)
 
     _log("parsing packets")
-    seen = set()
-    parsed = []
-    for data in pkts:
-        info = _parse_packet(data)
-        if info is None:
-            continue
-        sp, dp, sq, pl, off, fl = info
-        if PORT not in (sp, dp):
-            continue
-        k = (sp, dp, sq, pl)
-        if k in seen:
-            continue
-        seen.add(k)
-        parsed.append((sp, dp, sq, pl, off, fl, data))
+    parsed = _parse_captured(pkts, PORT)
     _log("parsed %d unique packets" % len(parsed))
 
     _log("reading strace log")
