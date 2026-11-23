@@ -109,6 +109,26 @@ def _kill_proc(proc):
         pass
 
 
+def _cleanup(*, st, srv, sn, cap_thread, stop_capture, log):
+    _log("entering finally")
+    stop_capture.set()
+    if cap_thread is not None:
+        cap_thread.join(timeout=2)
+    _kill_proc(st)
+    _kill_proc(srv)
+    if sn is not None:
+        try:
+            sn.close()
+        except OSError:
+            pass
+    try:
+        if os.path.exists(log):
+            os.remove(log)
+    except OSError:
+        pass
+    _log("cleanup done")
+
+
 def _build_srv_code(host, port):
     return (
         "import socket; "
@@ -475,20 +495,11 @@ except Exception as e:
     sys.exit(1)
 
 finally:
-    _log("entering finally")
-    stop_capture.set()
-    if cap_thread is not None:
-        cap_thread.join(timeout=2)
-    _kill_proc(st)
-    _kill_proc(srv)
-    if sn is not None:
-        try:
-            sn.close()
-        except OSError:
-            pass
-    try:
-        if os.path.exists(LOG):
-            os.remove(LOG)
-    except OSError:
-        pass
-    _log("cleanup done")
+    _cleanup(
+        st=st,
+        srv=srv,
+        sn=sn,
+        cap_thread=cap_thread,
+        stop_capture=stop_capture,
+        log=LOG,
+    )
