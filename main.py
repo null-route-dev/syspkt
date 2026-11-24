@@ -12,8 +12,6 @@ import time
 START = time.time()
 VERBOSE = False
 JSON_OUT = False
-TIMEOUT = None
-IFACE = "lo"
 
 
 def _positive_float(s):
@@ -127,6 +125,111 @@ def _cleanup(*, st, srv, sn, cap_thread, stop_capture, log):
     except OSError:
         pass
     _log("cleanup done")
+
+
+def _pkill_old_servers():
+    _log("pkill old servers")
+    try:
+        subprocess.run(
+            [
+                "pkill", "-f",
+                "s\\.setsockopt\\(socket\\.SOL_SOCKET, "
+                "socket\\.SO_REUSEADDR, 1\\)",
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        _log("pkill skipped: %s" % e)
+
+
+def _remove_log_file(log):
+    _log("removing old log")
+    try:
+        if os.path.exists(log):
+            os.remove(log)
+    except OSError as e:
+        _log("remove failed: %s" % e)
+
+
+def _spawn_server(srv_code):
+    _log("spawning server")
+    srv = subprocess.Popen(
+        ["python3", "-c", srv_code],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _log("server pid=%d" % srv.pid)
+    time.sleep(.5)
+    _log("server warm-up done, poll=%r" % srv.poll())
+    return srv
+
+
+def _open_raw_socket(iface):
+    _log("binding raw socket on %s" % iface)
+    sn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+    if iface and iface not in ("any", "*"):
+        sn.bind((iface, 0))
+    sn.settimeout(.1)
+    try:
+        sn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
+        _log("SO_RCVBUF set to 32MB")
+    except OSError as e:
+        _log("SO_RCVBUF failed: %s" % e)
+    return sn
+
+
+def _start_capture(sn, port, pkts, stats, stop_capture):
+    cap_thread = threading.Thread(
+        target=_capture,
+        args=(sn, port, pkts, stats, stop_capture),
+        daemon=True,
+    )
+    cap_thread.start()
+    _log("capture thread started")
+    return cap_thread
+
+
+def _stop_capture(cap_thread, stop_capture, sn, pkts, port, stats):
+    _log("stopping capture thread")
+    stop_capture.set()
+    if cap_thread is not None:
+        cap_thread.join(timeout=2)
+    if sn is not None:
+        try:
+            sn.close()
+        except OSError:
+            pass
+    _log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), port, stats["reads"]))
+
+
+def _spawn_strace(log, cli_code):
+    _log("spawning strace")
+    st = subprocess.Popen(
+        [
+            "strace", "-f", "-y", "-e", "trace=%network",
+            "-o", log, "python3", "-c", cli_code,
+        ],
+    )
+    st_start = time.time()
+    _log("strace pid=%d" % st.pid)
+    return st, st_start
+
+
+def _wait_strace(st, st_start, timeout):
+    _log("waiting for strace (timeout=%r)" % timeout)
+    while True:
+        try:
+            st.wait(timeout=0.5)
+            _log("strace finished rc=%d after %.2fs" % (st.returncode, time.time() - st_start))
+            return False
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - st_start
+            _log("strace still running, t=%.1fs" % elapsed)
+            if timeout is not None and elapsed > timeout:
+                _log("timeout exceeded, killing strace")
+                _kill_proc(st)
+                return True
 
 
 def _build_srv_code(host, port):
@@ -335,171 +438,108 @@ def _match(sends, conns, parsed):
     return matched
 
 
-args = _parse_argv(sys.argv[1:])
+def main(argv=None):
+    global VERBOSE, JSON_OUT
 
-HOST = args.host
-PORT = args.port
-MSG = args.msg.encode()
-IFACE = args.iface
-TIMEOUT = args.timeout
-VERBOSE = args.verbose
-JSON_OUT = args.json
-LOG = "/tmp/t.log"
+    args = _parse_argv(sys.argv[1:] if argv is None else argv)
+    VERBOSE = args.verbose
+    JSON_OUT = args.json
 
-_log("verbose on")
-_log("json=%r verbose=%r timeout=%r iface=%r" % (JSON_OUT, VERBOSE, TIMEOUT, IFACE))
-_log("host=%s port=%d msg=%r" % (HOST, PORT, MSG))
+    host = args.host
+    port = args.port
+    msg = args.msg.encode()
+    iface = args.iface
+    timeout = args.timeout
+    log = "/tmp/t.log"
 
-_validate_iface(IFACE)
+    _log("verbose on")
+    _log("json=%r verbose=%r timeout=%r iface=%r" % (JSON_OUT, VERBOSE, timeout, iface))
+    _log("host=%s port=%d msg=%r" % (host, port, msg))
 
-SRV_CODE = _build_srv_code(HOST, PORT)
-CLI_CODE = _build_cli_code(HOST, PORT, MSG.hex())
+    _validate_iface(iface)
 
-if not JSON_OUT:
-    print("start", flush=True)
+    srv_code = _build_srv_code(host, port)
+    cli_code = _build_cli_code(host, port, msg.hex())
 
-_log("pkill old servers")
-try:
-    subprocess.run(
-        [
-            "pkill", "-f",
-            "s\\.setsockopt\\(socket\\.SOL_SOCKET, "
-            "socket\\.SO_REUSEADDR, 1\\)",
-        ],
-        capture_output=True,
-        timeout=5,
-    )
-except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-    _log("pkill skipped: %s" % e)
-
-srv = None
-st = None
-sn = None
-cap_thread = None
-stop_capture = threading.Event()
-stats = {"reads": 0, "matched": 0}
-timed_out = False
-
-try:
-    _log("removing old log")
-    try:
-        if os.path.exists(LOG):
-            os.remove(LOG)
-    except OSError as e:
-        _log("remove failed: %s" % e)
-
-    _log("spawning server")
-    srv = subprocess.Popen(
-        ["python3", "-c", SRV_CODE],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    _log("server pid=%d" % srv.pid)
-    time.sleep(.5)
-    _log("server warm-up done, poll=%r" % srv.poll())
-
-    _log("binding raw socket on %s" % IFACE)
-    sn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
-    if IFACE and IFACE not in ("any", "*"):
-        sn.bind((IFACE, 0))
-    sn.settimeout(.1)
-    try:
-        sn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
-        _log("SO_RCVBUF set to 32MB")
-    except OSError as e:
-        _log("SO_RCVBUF failed: %s" % e)
-
-    pkts = []
-    cap_thread = threading.Thread(
-        target=_capture,
-        args=(sn, PORT, pkts, stats, stop_capture),
-        daemon=True,
-    )
-    cap_thread.start()
-    _log("capture thread started")
-
-    _log("spawning strace")
-    st = subprocess.Popen(
-        [
-            "strace", "-f", "-y", "-e", "trace=%network",
-            "-o", LOG, "python3", "-c", CLI_CODE,
-        ],
-    )
-    st_start = time.time()
-    _log("strace pid=%d" % st.pid)
-
-    _log("polling /proc/net/tcp")
-    timeout_at = (st_start + TIMEOUT) if TIMEOUT is not None else None
-    conns, timed_out = _poll_proc_net_tcp(duration=1.5, timeout_at=timeout_at)
-    if timed_out:
-        _log("timeout during polling, killing strace")
-    _log("collected %d conns" % len(conns))
-
-    if timed_out:
-        _kill_proc(st)
-    else:
-        _log("waiting for strace (timeout=%r)" % TIMEOUT)
-        while True:
-            try:
-                st.wait(timeout=0.5)
-                _log("strace finished rc=%d after %.2fs" % (st.returncode, time.time() - st_start))
-                break
-            except subprocess.TimeoutExpired:
-                elapsed = time.time() - st_start
-                _log("strace still running, t=%.1fs" % elapsed)
-                if TIMEOUT is not None and elapsed > TIMEOUT:
-                    _log("timeout exceeded, killing strace")
-                    timed_out = True
-                    _kill_proc(st)
-                    break
-    st = None
-
-    _log("stopping capture thread")
-    stop_capture.set()
-    cap_thread.join(timeout=2)
-    cap_thread = None
-    sn.close()
-    sn = None
-    _log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), PORT, stats["reads"]))
-
-    if timed_out:
-        if not JSON_OUT:
-            print("timeout after %.1fs" % TIMEOUT, flush=True)
-        _emit({"type": "timeout", "after": TIMEOUT})
-        sys.exit(124)
-
-    _log("parsing packets")
-    parsed = _parse_captured(pkts, PORT)
-    _log("parsed %d unique packets" % len(parsed))
-
-    _log("reading strace log")
-    sends = _parse_strace_log(LOG)
-    _log("read %d send() calls" % len(sends))
-
-    _log("matching")
-    matched = _match(sends, conns, parsed)
-    _log("matched %d sendto calls" % matched)
-
-    if matched == 0:
-        _log("no match, exit 1")
-        sys.exit(1)
-
-except KeyboardInterrupt:
     if not JSON_OUT:
-        print("\ninterrupted", flush=True)
-    _emit({"type": "interrupted"})
-    sys.exit(130)
+        print("start", flush=True)
 
-except Exception as e:
-    sys.stderr.write("error: %s: %s\n" % (type(e).__name__, e))
-    sys.exit(1)
+    _pkill_old_servers()
+    _remove_log_file(log)
 
-finally:
-    _cleanup(
-        st=st,
-        srv=srv,
-        sn=sn,
-        cap_thread=cap_thread,
-        stop_capture=stop_capture,
-        log=LOG,
-    )
+    srv = None
+    st = None
+    sn = None
+    cap_thread = None
+    stop_capture = threading.Event()
+    stats = {"reads": 0, "matched": 0}
+    timed_out = False
+
+    try:
+        srv = _spawn_server(srv_code)
+        sn = _open_raw_socket(iface)
+
+        pkts = []
+        cap_thread = _start_capture(sn, port, pkts, stats, stop_capture)
+
+        st, st_start = _spawn_strace(log, cli_code)
+
+        timeout_at = (st_start + timeout) if timeout is not None else None
+        conns, timed_out = _poll_proc_net_tcp(duration=1.5, timeout_at=timeout_at)
+        if timed_out:
+            _log("timeout during polling, killing strace")
+        _log("collected %d conns" % len(conns))
+
+        if timed_out:
+            _kill_proc(st)
+        else:
+            timed_out = _wait_strace(st, st_start, timeout)
+        st = None
+
+        _stop_capture(cap_thread, stop_capture, sn, pkts, port, stats)
+        cap_thread = None
+        sn = None
+
+        if timed_out:
+            if not JSON_OUT:
+                print("timeout after %.1fs" % timeout, flush=True)
+            _emit({"type": "timeout", "after": timeout})
+            return 124
+
+        parsed = _parse_captured(pkts, port)
+        _log("parsed %d unique packets" % len(parsed))
+
+        sends = _parse_strace_log(log)
+        _log("read %d send() calls" % len(sends))
+
+        matched = _match(sends, conns, parsed)
+        _log("matched %d sendto calls" % matched)
+
+        if matched == 0:
+            _log("no match, exit 1")
+            return 1
+        return 0
+
+    except KeyboardInterrupt:
+        if not JSON_OUT:
+            print("\ninterrupted", flush=True)
+        _emit({"type": "interrupted"})
+        return 130
+
+    except Exception as e:
+        sys.stderr.write("error: %s: %s\n" % (type(e).__name__, e))
+        return 1
+
+    finally:
+        _cleanup(
+            st=st,
+            srv=srv,
+            sn=sn,
+            cap_thread=cap_thread,
+            stop_capture=stop_capture,
+            log=log,
+        )
+
+
+if __name__ == "__main__":
+    sys.exit(main())
