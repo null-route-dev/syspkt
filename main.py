@@ -368,30 +368,64 @@ def _flags(fl):
     return fs
 
 
+def _h2ip(hex_ip, hex_port):
+    return "%d.%d.%d.%d:%d" % (
+        int(hex_ip[6:8], 16), int(hex_ip[4:6], 16),
+        int(hex_ip[2:4], 16), int(hex_ip[0:2], 16),
+        int(hex_port, 16),
+    )
+
+
+def _parse_conn(conns, ino):
+    if ino not in conns:
+        return None
+    lh, lp = conns[ino][0].split(":")
+    rh, rp = conns[ino][1].split(":")
+    return (
+        _h2ip(lh, lp), _h2ip(rh, rp),
+        int(lp, 16), int(rp, 16),
+    )
+
+
+def _emit_packet(sq, pl, off, fl, p, lport, rport):
+    fs = _flags(fl)
+    if not JSON_OUT:
+        fs_s = "-".join(fs) if fs else "NONE"
+        if pl == 0:
+            print("  %s ->" % fs_s, lport, "->", rport, "seq", sq, flush=True)
+        else:
+            print(
+                "  %s ->" % fs_s, lport, "->", rport,
+                "seq", sq, "payload", pl, repr(p[off:off + pl]),
+                flush=True,
+            )
+    _emit({
+        "type": "packet",
+        "src": "%d.%d.%d.%d:%d" % (
+            int(p[26]), int(p[27]), int(p[28]), int(p[29]), lport,
+        ),
+        "dst": "%d.%d.%d.%d:%d" % (
+            int(p[30]), int(p[31]), int(p[32]), int(p[33]), rport,
+        ),
+        "seq": sq,
+        "flags": fs,
+        "payload_len": pl,
+        "payload": p[off:off + pl].decode("utf-8", "replace") if pl > 0 else "",
+    })
+
+
 def _match(sends, conns, parsed):
     matched = 0
     printed_inodes = set()
     for ino, nb in sends:
         if not JSON_OUT:
             print("sendto", nb, "bytes", flush=True)
-        if ino not in conns:
+        info = _parse_conn(conns, ino)
+        if info is None:
             _log("inode %s not in conns, skipped" % ino)
             _emit({"type": "sendto", "bytes": nb, "matched": False})
             continue
-        lh, lp = conns[ino][0].split(":")
-        rh, rp = conns[ino][1].split(":")
-        lport = int(lp, 16)
-        rport = int(rp, 16)
-        ls = "%d.%d.%d.%d:%d" % (
-            int(lh[6:8], 16), int(lh[4:6], 16),
-            int(lh[2:4], 16), int(lh[0:2], 16),
-            int(lp, 16),
-        )
-        rs = "%d.%d.%d.%d:%d" % (
-            int(rh[6:8], 16), int(rh[4:6], 16),
-            int(rh[2:4], 16), int(rh[0:2], 16),
-            int(rp, 16),
-        )
+        ls, rs, lport, rport = info
         if not JSON_OUT:
             print("  conn", ls, "->", rs, flush=True)
         _emit({"type": "conn", "src": ls, "dst": rs})
@@ -403,31 +437,7 @@ def _match(sends, conns, parsed):
         if ino not in printed_inodes:
             printed_inodes.add(ino)
             for sq, pl, off, fl, p in events:
-                fs = _flags(fl)
-                if not JSON_OUT:
-                    fs_s = "-".join(fs) if fs else "NONE"
-                    if pl == 0:
-                        print("  %s ->" % fs_s, lport, "->", rport, "seq", sq, flush=True)
-                    else:
-                        print(
-                            "  %s ->" % fs_s, lport, "->", rport,
-                            "seq", sq, "payload", pl,
-                            repr(p[off:off + pl]),
-                            flush=True,
-                        )
-                _emit({
-                    "type": "packet",
-                    "src": "%d.%d.%d.%d:%d" % (
-                        int(p[26]), int(p[27]), int(p[28]), int(p[29]), lport,
-                    ),
-                    "dst": "%d.%d.%d.%d:%d" % (
-                        int(p[30]), int(p[31]), int(p[32]), int(p[33]), rport,
-                    ),
-                    "seq": sq,
-                    "flags": fs,
-                    "payload_len": pl,
-                    "payload": p[off:off + pl].decode("utf-8", "replace") if pl > 0 else "",
-                })
+                _emit_packet(sq, pl, off, fl, p, lport, rport)
         hit = False
         for sq, pl, off, fl, p in events:
             if pl == nb:
