@@ -9,10 +9,6 @@ import subprocess
 import threading
 import time
 
-START = time.time()
-VERBOSE = False
-JSON_OUT = False
-
 
 def _positive_float(s):
     try:
@@ -60,16 +56,25 @@ def _parse_argv(argv):
     return p.parse_args(argv)
 
 
-def _log(msg):
-    if VERBOSE and not JSON_OUT:
-        sys.stderr.write("[%7.3f] %s\n" % (time.time() - START, msg))
-        sys.stderr.flush()
+class Logger:
+    def __init__(self):
+        self.start = time.time()
+        self.verbose = False
+        self.json_out = False
 
+    def log(self, msg):
+        if self.verbose and not self.json_out:
+            sys.stderr.write("[%7.3f] %s\n" % (time.time() - self.start, msg))
+            sys.stderr.flush()
 
-def _emit(obj):
-    if JSON_OUT:
-        sys.stdout.write(json.dumps(obj) + "\n")
-        sys.stdout.flush()
+    def emit(self, obj):
+        if self.json_out:
+            sys.stdout.write(json.dumps(obj) + "\n")
+            sys.stdout.flush()
+
+    def text(self, *args, **kwargs):
+        if not self.json_out:
+            print(*args, **kwargs)
 
 
 def _validate_iface(iface):
@@ -107,8 +112,8 @@ def _kill_proc(proc):
         pass
 
 
-def _cleanup(*, st, srv, sn, cap_thread, stop_capture, log):
-    _log("entering finally")
+def _cleanup(*, st, srv, sn, cap_thread, stop_capture, log, logger):
+    logger.log("entering finally")
     stop_capture.set()
     if cap_thread is not None:
         cap_thread.join(timeout=2)
@@ -124,11 +129,11 @@ def _cleanup(*, st, srv, sn, cap_thread, stop_capture, log):
             os.remove(log)
     except OSError:
         pass
-    _log("cleanup done")
+    logger.log("cleanup done")
 
 
-def _pkill_old_servers():
-    _log("pkill old servers")
+def _pkill_old_servers(logger):
+    logger.log("pkill old servers")
     try:
         subprocess.run(
             [
@@ -140,58 +145,58 @@ def _pkill_old_servers():
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        _log("pkill skipped: %s" % e)
+        logger.log("pkill skipped: %s" % e)
 
 
-def _remove_log_file(log):
-    _log("removing old log")
+def _remove_log_file(log, logger):
+    logger.log("removing old log")
     try:
         if os.path.exists(log):
             os.remove(log)
     except OSError as e:
-        _log("remove failed: %s" % e)
+        logger.log("remove failed: %s" % e)
 
 
-def _spawn_server(srv_code):
-    _log("spawning server")
+def _spawn_server(srv_code, logger):
+    logger.log("spawning server")
     srv = subprocess.Popen(
         ["python3", "-c", srv_code],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    _log("server pid=%d" % srv.pid)
+    logger.log("server pid=%d" % srv.pid)
     time.sleep(.5)
-    _log("server warm-up done, poll=%r" % srv.poll())
+    logger.log("server warm-up done, poll=%r" % srv.poll())
     return srv
 
 
-def _open_raw_socket(iface):
-    _log("binding raw socket on %s" % iface)
+def _open_raw_socket(iface, logger):
+    logger.log("binding raw socket on %s" % iface)
     sn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
     if iface and iface not in ("any", "*"):
         sn.bind((iface, 0))
     sn.settimeout(.1)
     try:
         sn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
-        _log("SO_RCVBUF set to 32MB")
+        logger.log("SO_RCVBUF set to 32MB")
     except OSError as e:
-        _log("SO_RCVBUF failed: %s" % e)
+        logger.log("SO_RCVBUF failed: %s" % e)
     return sn
 
 
-def _start_capture(sn, port, pkts, stats, stop_capture):
+def _start_capture(sn, port, pkts, stats, stop_capture, logger):
     cap_thread = threading.Thread(
         target=_capture,
         args=(sn, port, pkts, stats, stop_capture),
         daemon=True,
     )
     cap_thread.start()
-    _log("capture thread started")
+    logger.log("capture thread started")
     return cap_thread
 
 
-def _stop_capture(cap_thread, stop_capture, sn, pkts, port, stats):
-    _log("stopping capture thread")
+def _stop_capture(cap_thread, stop_capture, sn, pkts, port, stats, logger):
+    logger.log("stopping capture thread")
     stop_capture.set()
     if cap_thread is not None:
         cap_thread.join(timeout=2)
@@ -200,11 +205,11 @@ def _stop_capture(cap_thread, stop_capture, sn, pkts, port, stats):
             sn.close()
         except OSError:
             pass
-    _log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), port, stats["reads"]))
+    logger.log("captured %d packets on port %d (raw reads: %d)" % (len(pkts), port, stats["reads"]))
 
 
-def _spawn_strace(log, cli_code):
-    _log("spawning strace")
+def _spawn_strace(log, cli_code, logger):
+    logger.log("spawning strace")
     st = subprocess.Popen(
         [
             "strace", "-f", "-y", "-e", "trace=%network",
@@ -212,22 +217,22 @@ def _spawn_strace(log, cli_code):
         ],
     )
     st_start = time.time()
-    _log("strace pid=%d" % st.pid)
+    logger.log("strace pid=%d" % st.pid)
     return st, st_start
 
 
-def _wait_strace(st, st_start, timeout):
-    _log("waiting for strace (timeout=%r)" % timeout)
+def _wait_strace(st, st_start, timeout, logger):
+    logger.log("waiting for strace (timeout=%r)" % timeout)
     while True:
         try:
             st.wait(timeout=0.5)
-            _log("strace finished rc=%d after %.2fs" % (st.returncode, time.time() - st_start))
+            logger.log("strace finished rc=%d after %.2fs" % (st.returncode, time.time() - st_start))
             return False
         except subprocess.TimeoutExpired:
             elapsed = time.time() - st_start
-            _log("strace still running, t=%.1fs" % elapsed)
+            logger.log("strace still running, t=%.1fs" % elapsed)
             if timeout is not None and elapsed > timeout:
-                _log("timeout exceeded, killing strace")
+                logger.log("timeout exceeded, killing strace")
                 _kill_proc(st)
                 return True
 
@@ -310,7 +315,7 @@ def _parse_strace_log(path):
     return sends
 
 
-def _poll_proc_net_tcp(duration=1.5, timeout_at=None):
+def _poll_proc_net_tcp(logger, duration=1.5, timeout_at=None):
     conns = {}
     start = time.time()
     i = 0
@@ -324,7 +329,7 @@ def _poll_proc_net_tcp(duration=1.5, timeout_at=None):
         except (FileNotFoundError, OSError):
             pass
         if i % 10 == 0:
-            _log("  poll %d, %d conns" % (i, len(conns)))
+            logger.log("  poll %d, %d conns" % (i, len(conns)))
         if timeout_at is not None and time.time() > timeout_at:
             return conns, True
         time.sleep(.05)
@@ -387,19 +392,18 @@ def _parse_conn(conns, ino):
     )
 
 
-def _emit_packet(sq, pl, off, fl, p, lport, rport):
+def _emit_packet(sq, pl, off, fl, p, lport, rport, logger):
     fs = _flags(fl)
-    if not JSON_OUT:
-        fs_s = "-".join(fs) if fs else "NONE"
-        if pl == 0:
-            print("  %s ->" % fs_s, lport, "->", rport, "seq", sq, flush=True)
-        else:
-            print(
-                "  %s ->" % fs_s, lport, "->", rport,
-                "seq", sq, "payload", pl, repr(p[off:off + pl]),
-                flush=True,
-            )
-    _emit({
+    fs_s = "-".join(fs) if fs else "NONE"
+    if pl == 0:
+        logger.text("  %s ->" % fs_s, lport, "->", rport, "seq", sq, flush=True)
+    else:
+        logger.text(
+            "  %s ->" % fs_s, lport, "->", rport,
+            "seq", sq, "payload", pl, repr(p[off:off + pl]),
+            flush=True,
+        )
+    logger.emit({
         "type": "packet",
         "src": "%d.%d.%d.%d:%d" % (
             int(p[26]), int(p[27]), int(p[28]), int(p[29]), lport,
@@ -414,21 +418,19 @@ def _emit_packet(sq, pl, off, fl, p, lport, rport):
     })
 
 
-def _match(sends, conns, parsed):
+def _match(sends, conns, parsed, logger):
     matched = 0
     printed_inodes = set()
     for ino, nb in sends:
-        if not JSON_OUT:
-            print("sendto", nb, "bytes", flush=True)
+        logger.text("sendto", nb, "bytes", flush=True)
         info = _parse_conn(conns, ino)
         if info is None:
-            _log("inode %s not in conns, skipped" % ino)
-            _emit({"type": "sendto", "bytes": nb, "matched": False})
+            logger.log("inode %s not in conns, skipped" % ino)
+            logger.emit({"type": "sendto", "bytes": nb, "matched": False})
             continue
         ls, rs, lport, rport = info
-        if not JSON_OUT:
-            print("  conn", ls, "->", rs, flush=True)
-        _emit({"type": "conn", "src": ls, "dst": rs})
+        logger.text("  conn", ls, "->", rs, flush=True)
+        logger.emit({"type": "conn", "src": ls, "dst": rs})
         events = []
         for sp, dp, sq, pl, off, fl, p in parsed:
             if sp == lport and dp == rport:
@@ -437,23 +439,23 @@ def _match(sends, conns, parsed):
         if ino not in printed_inodes:
             printed_inodes.add(ino)
             for sq, pl, off, fl, p in events:
-                _emit_packet(sq, pl, off, fl, p, lport, rport)
+                _emit_packet(sq, pl, off, fl, p, lport, rport, logger)
         hit = False
         for sq, pl, off, fl, p in events:
             if pl == nb:
                 matched += 1
                 hit = True
                 break
-        _emit({"type": "sendto", "bytes": nb, "matched": hit})
+        logger.emit({"type": "sendto", "bytes": nb, "matched": hit})
     return matched
 
 
 def main(argv=None):
-    global VERBOSE, JSON_OUT
+    logger = Logger()
 
     args = _parse_argv(sys.argv[1:] if argv is None else argv)
-    VERBOSE = args.verbose
-    JSON_OUT = args.json
+    logger.verbose = args.verbose
+    logger.json_out = args.json
 
     host = args.host
     port = args.port
@@ -462,20 +464,19 @@ def main(argv=None):
     timeout = args.timeout
     log = "/tmp/t.log"
 
-    _log("verbose on")
-    _log("json=%r verbose=%r timeout=%r iface=%r" % (JSON_OUT, VERBOSE, timeout, iface))
-    _log("host=%s port=%d msg=%r" % (host, port, msg))
+    logger.log("verbose on")
+    logger.log("json=%r verbose=%r timeout=%r iface=%r" % (logger.json_out, logger.verbose, timeout, iface))
+    logger.log("host=%s port=%d msg=%r" % (host, port, msg))
 
     _validate_iface(iface)
 
     srv_code = _build_srv_code(host, port)
     cli_code = _build_cli_code(host, port, msg.hex())
 
-    if not JSON_OUT:
-        print("start", flush=True)
+    logger.text("start", flush=True)
 
-    _pkill_old_servers()
-    _remove_log_file(log)
+    _pkill_old_servers(logger)
+    _remove_log_file(log, logger)
 
     srv = None
     st = None
@@ -486,54 +487,52 @@ def main(argv=None):
     timed_out = False
 
     try:
-        srv = _spawn_server(srv_code)
-        sn = _open_raw_socket(iface)
+        srv = _spawn_server(srv_code, logger)
+        sn = _open_raw_socket(iface, logger)
 
         pkts = []
-        cap_thread = _start_capture(sn, port, pkts, stats, stop_capture)
+        cap_thread = _start_capture(sn, port, pkts, stats, stop_capture, logger)
 
-        st, st_start = _spawn_strace(log, cli_code)
+        st, st_start = _spawn_strace(log, cli_code, logger)
 
         timeout_at = (st_start + timeout) if timeout is not None else None
-        conns, timed_out = _poll_proc_net_tcp(duration=1.5, timeout_at=timeout_at)
+        conns, timed_out = _poll_proc_net_tcp(logger, duration=1.5, timeout_at=timeout_at)
         if timed_out:
-            _log("timeout during polling, killing strace")
-        _log("collected %d conns" % len(conns))
+            logger.log("timeout during polling, killing strace")
+        logger.log("collected %d conns" % len(conns))
 
         if timed_out:
             _kill_proc(st)
         else:
-            timed_out = _wait_strace(st, st_start, timeout)
+            timed_out = _wait_strace(st, st_start, timeout, logger)
         st = None
 
-        _stop_capture(cap_thread, stop_capture, sn, pkts, port, stats)
+        _stop_capture(cap_thread, stop_capture, sn, pkts, port, stats, logger)
         cap_thread = None
         sn = None
 
         if timed_out:
-            if not JSON_OUT:
-                print("timeout after %.1fs" % timeout, flush=True)
-            _emit({"type": "timeout", "after": timeout})
+            logger.text("timeout after %.1fs" % timeout, flush=True)
+            logger.emit({"type": "timeout", "after": timeout})
             return 124
 
         parsed = _parse_captured(pkts, port)
-        _log("parsed %d unique packets" % len(parsed))
+        logger.log("parsed %d unique packets" % len(parsed))
 
         sends = _parse_strace_log(log)
-        _log("read %d send() calls" % len(sends))
+        logger.log("read %d send() calls" % len(sends))
 
-        matched = _match(sends, conns, parsed)
-        _log("matched %d sendto calls" % matched)
+        matched = _match(sends, conns, parsed, logger)
+        logger.log("matched %d sendto calls" % matched)
 
         if matched == 0:
-            _log("no match, exit 1")
+            logger.log("no match, exit 1")
             return 1
         return 0
 
     except KeyboardInterrupt:
-        if not JSON_OUT:
-            print("\ninterrupted", flush=True)
-        _emit({"type": "interrupted"})
+        logger.text("\ninterrupted", flush=True)
+        logger.emit({"type": "interrupted"})
         return 130
 
     except Exception as e:
@@ -548,6 +547,7 @@ def main(argv=None):
             cap_thread=cap_thread,
             stop_capture=stop_capture,
             log=log,
+            logger=logger,
         )
 
 
