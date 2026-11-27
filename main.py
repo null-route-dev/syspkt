@@ -160,7 +160,7 @@ def _remove_log_file(log, logger):
 def _spawn_server(srv_code, logger):
     logger.log("spawning server")
     srv = subprocess.Popen(
-        ["python3", "-c", srv_code],
+        [sys.executable, "-c", srv_code],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -213,7 +213,7 @@ def _spawn_strace(log, cli_code, logger):
     st = subprocess.Popen(
         [
             "strace", "-f", "-y", "-e", "trace=%network",
-            "-o", log, "python3", "-c", cli_code,
+            "-o", log, sys.executable, "-c", cli_code,
         ],
     )
     st_start = time.time()
@@ -495,6 +495,7 @@ def main(argv=None):
 
         st, st_start = _spawn_strace(log, cli_code, logger)
 
+        logger.log("polling /proc/net/tcp")
         timeout_at = (st_start + timeout) if timeout is not None else None
         conns, timed_out = _poll_proc_net_tcp(logger, duration=1.5, timeout_at=timeout_at)
         if timed_out:
