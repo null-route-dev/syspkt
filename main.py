@@ -242,23 +242,23 @@ def _build_srv_code(host, port):
         "import socket; "
         "s=socket.socket(); "
         "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
-        "s.bind((\"%s\", %d)); "
+        f"s.bind(({host!r}, {port})); "
         "s.listen(1); "
         "c,_=s.accept(); "
         "c.recv(1024); "
         "c.close()"
-    ) % (host, port)
+    )
 
 
 def _build_cli_code(host, port, msg_hex):
     return (
         "import socket, struct, sys, time; "
-        "s=socket.create_connection((\"%s\", %d)); "
-        "s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(\"ii\", 1, 0)); "
+        f"s=socket.create_connection(({host!r}, {port})); "
+        's.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)); '
         "time.sleep(1); "
-        "s.send(bytes.fromhex(\"%s\")); "
+        f"s.send(bytes.fromhex({msg_hex!r})); "
         "s.close()"
-    ) % (host, port, msg_hex)
+    )
 
 
 def _parse_packet(data):
